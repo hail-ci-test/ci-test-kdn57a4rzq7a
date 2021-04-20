@@ -16,18 +16,19 @@
 # import sys
 # sys.path.insert(0, os.path.abspath('.'))
 import inspect
+import datetime
 
 # -- Project information -----------------------------------------------------
 
 project = 'Batch'
-copyright = '2020, Hail Team'
+copyright = '{}, Hail Team'.format(datetime.datetime.now().year)
 author = 'Hail Team'
 
 # The short X.Y version
 version = ''
 # The full version, including alpha/beta/rc tags
 release = ''
-
+nitpicky = True
 
 # -- General configuration ---------------------------------------------------
 
@@ -41,7 +42,10 @@ needs_sphinx = '1.5.4'
 extensions = [
     'sphinx.ext.autosummary',
     'sphinx.ext.autodoc',
-    'IPython.sphinxext.ipython_console_highlighting'
+    'sphinx.ext.intersphinx',
+    'sphinx.ext.napoleon',
+    'sphinx_autodoc_typehints',
+    'IPython.sphinxext.ipython_console_highlighting',
 ]
 
 automodapi_inheritance_diagram = False
@@ -52,7 +56,7 @@ autosummary_generate = ['api.rst']
 autosummary_generate_overwrite = True
 
 napoleon_use_rtype = False
-napoleon_use_param = False
+napoleon_use_param = True
 # napoleon_include_private_with_doc = True
 
 # Add any paths that contain templates here, relative to this directory.
@@ -111,6 +115,9 @@ html_theme = 'sphinx_rtd_theme'
 #
 # html_sidebars = {}
 
+# https://www.sphinx-doc.org/en/master/usage/extensions/intersphinx.html
+intersphinx_mapping = {'python': ('https://docs.python.org/3.7', None)}
+
 
 # -- Extension configuration -------------------------------------------------
 
@@ -146,9 +153,9 @@ def autodoc_skip_member(app, what, name, obj, skip, options):
 
     cls = get_class_that_defined_method(obj)
 
-    exclude = (name in exclusions or
-               (name.startswith('_') and not has_docstring(obj)) or
-               (cls and cls.__name__ in excluded_classes))
+    exclude = (name in exclusions
+               or (name.startswith('_') and not has_docstring(obj))
+               or (cls and cls.__name__ in excluded_classes))
 
     return exclude
 

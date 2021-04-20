@@ -1,3 +1,4 @@
+from typing import Optional
 import logging
 from functools import wraps
 import urllib.parse
@@ -5,33 +6,30 @@ import aiohttp
 from aiohttp import web
 import aiohttp_session
 from hailtop.config import get_deploy_config
-from hailtop.utils import request_retry_transient_errors
-from hailtop.tls import ssl_client_session
+from hailtop.auth import async_get_userinfo
 
 log = logging.getLogger('gear.auth')
 
 deploy_config = get_deploy_config()
 
+BEARER = 'Bearer '
+
+
+def maybe_parse_bearer_header(value: str) -> Optional[str]:
+    if value.startswith(BEARER):
+        return value[len(BEARER):]
+    return None
+
 
 async def _userdata_from_session_id(session_id):
-    headers = {'Authorization': f'Bearer {session_id}'}
     try:
-        async with ssl_client_session(
-                raise_for_status=True, timeout=aiohttp.ClientTimeout(total=5)) as session:
-            resp = await request_retry_transient_errors(
-                session, 'GET', deploy_config.url('auth', '/api/v1alpha/userinfo'),
-                headers=headers)
-            assert resp.status == 200
-            return await resp.json()
+        return await async_get_userinfo(deploy_config=deploy_config, session_id=session_id)
     except aiohttp.ClientResponseError as e:
-        if e.status == 401:
-            return None
-
         log.exception('unknown exception getting userinfo')
-        raise web.HTTPInternalServerError()
-    except Exception:  # pylint: disable=broad-except
+        raise web.HTTPInternalServerError() from e
+    except Exception as e:  # pylint: disable=broad-except
         log.exception('unknown exception getting userinfo')
-        raise web.HTTPInternalServerError()
+        raise web.HTTPInternalServerError() from e
 
 
 async def userdata_from_web_request(request):
@@ -45,8 +43,9 @@ async def userdata_from_rest_request(request):
     if 'Authorization' not in request.headers:
         return None
     auth_header = request.headers['Authorization']
-    if not auth_header.startswith('Bearer '):
-        return None
+    session_id = maybe_parse_bearer_header(auth_header)
+    if not session_id:
+        return session_id
     return await _userdata_from_session_id(auth_header[7:])
 
 
@@ -54,6 +53,9 @@ def rest_authenticated_users_only(fun):
     async def wrapped(request, *args, **kwargs):
         userdata = await userdata_from_rest_request(request)
         if not userdata:
+            web_userdata = await userdata_from_web_request(request)
+            if web_userdata:
+                return web.HTTPUnauthorized(reason="provided web auth to REST endpoint")
             raise web.HTTPUnauthorized()
         return await fun(request, userdata, *args, **kwargs)
     return wrapped
@@ -83,6 +85,9 @@ def web_authenticated_users_only(redirect=True):
         async def wrapped(request, *args, **kwargs):
             userdata = await userdata_from_web_request(request)
             if not userdata:
+                rest_userdata = await userdata_from_rest_request(request)
+                if rest_userdata:
+                    return web.HTTPUnauthorized(reason="provided REST auth to web endpoint")
                 raise _web_unauthorized(request, redirect)
             return await fun(request, userdata, *args, **kwargs)
         return wrapped

@@ -5,7 +5,7 @@ import argparse
 import re
 import time
 
-from hailtop import hailctl
+from hailtop import version
 
 
 def print_help():
@@ -54,14 +54,14 @@ def check_for_update():
         if check_for_update:
             open(check_file, 'w').close()  # touch the file
 
-            import subprocess as sp
+            import subprocess as sp  # pylint: disable=import-outside-toplevel
             try:
                 pip_out = sp.check_output(['pip', 'search', 'hail'], stderr=sp.STDOUT)
             except Exception:  # pylint: disable=broad-except
                 pip_out = sp.check_output(['pip3', 'search', 'hail'], stderr=sp.STDOUT)
 
-            latest = re.search(r'hail \((\d+)\.(\d+)\.(\d+).*', pip_out.decode()).groups()
-            installed = re.search(r'(\d+)\.(\d+)\.(\d+).*', hailctl.version()).groups()
+            latest = re.search(r'hail \((\\d+)\.(\\d+)\.(\\d+).*', pip_out.decode()).groups()
+            installed = re.search(r'(\d+)\.(\d+)\.(\d+).*', version()).groups()
 
             def int_version(version):
                 return tuple(map(int, version))
@@ -81,7 +81,7 @@ def check_for_update():
 
 
 def print_version():
-    print(hailctl.version())
+    print(version())
 
 
 def main():
@@ -96,22 +96,22 @@ def main():
         if module == 'version':
             print_version()
         elif module == 'dataproc':
-            from hailtop.hailctl.dataproc import cli
+            from hailtop.hailctl.dataproc import cli  # pylint: disable=import-outside-toplevel
             cli.main(args)
         elif module == 'auth':
-            from hailtop.hailctl.auth import cli
+            from hailtop.hailctl.auth import cli  # pylint: disable=import-outside-toplevel
             cli.main(args)
         elif module == 'dev':
-            from hailtop.hailctl.dev import cli
+            from hailtop.hailctl.dev import cli  # pylint: disable=import-outside-toplevel
             cli.main(args)
         elif module == 'batch':
-            from hailtop.hailctl.batch import cli
+            from hailtop.hailctl.batch import cli  # pylint: disable=import-outside-toplevel
             cli.main(args)
         elif module == 'curl':
-            from hailtop.hailctl.curl import main
+            from hailtop.hailctl.curl import main  # pylint: disable=import-outside-toplevel
             main(args)
         elif module == 'config':
-            from hailtop.hailctl.config import cli
+            from hailtop.hailctl.config import cli  # pylint: disable=import-outside-toplevel
             cli.main(args)
         elif module in ('-h', '--help', 'help'):
             print_help()

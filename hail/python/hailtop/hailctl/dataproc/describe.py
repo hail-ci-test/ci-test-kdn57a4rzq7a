@@ -18,7 +18,7 @@ def parse_schema(s):
             if s[i] == end_delimiter:
                 if s[:i]:
                     values.append(s[:i])
-                if element_type in ['Array', 'Set', 'Dict']:
+                if element_type in ['Array', 'Set', 'Dict', 'Tuple', 'Interval']:
                     return {'type': element_type, 'value': values}, s[i + 1:]
                 return {'type': element_type, 'value': OrderedDict(zip(keys, values))}, s[i + 1:]
 
@@ -101,10 +101,15 @@ def get_partitions_info_str(j):
 def init_parser(parser):
     # arguments with default parameters
     parser.add_argument('file', type=str, help='Path to hail file (either MatrixTable or Table).')
+    parser.add_argument('--requester-pays-project-id', '-u', help='Project to be billed for GCS requests.')
 
 
 def main(args, pass_through_args):  # pylint: disable=unused-argument
-    command = ['gsutil'] if args.file.startswith('gs://') else []
+    command = []
+    if args.file.startswith('gs://'):
+        command = ['gsutil']
+        if args.requester_pays_project_id:
+            command.extend(['-u', args.requester_pays_project_id])
 
     j = json.loads(
         decompress(

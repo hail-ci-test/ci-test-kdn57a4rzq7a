@@ -3,20 +3,18 @@ import json
 import os
 import subprocess as sp
 import sys
+import errno
 from subprocess import check_output
 
 assert sys.version_info > (3, 0), sys.version_info
 
-if sys.version_info >= (3, 7):
-    def safe_call(*args, **kwargs):
-        sp.run(args, capture_output=True, check=True, **kwargs)
-else:
-    def safe_call(*args, **kwargs):
-        try:
-            sp.check_output(args, stderr=sp.STDOUT, **kwargs)
-        except sp.CalledProcessError as e:
-            print(e.output).decode()
-            raise e
+
+def safe_call(*args, **kwargs):
+    try:
+        sp.check_output(args, stderr=sp.STDOUT, **kwargs)
+    except sp.CalledProcessError as e:
+        print(e.output.decode())
+        raise e
 
 
 def get_metadata(key):
@@ -27,7 +25,7 @@ def mkdir_if_not_exists(path):
     try:
         os.makedirs(path)
     except OSError as e:
-        if e.errno != os.errno.EEXIST:
+        if e.errno != errno.EEXIST:
             raise
 
 
@@ -86,11 +84,20 @@ if role == 'Master':
         'PYSPARK_DRIVER_PYTHON': '/opt/conda/default/bin/python',
     }
 
+    # VEP ENV
+    try:
+        vep_config_uri = get_metadata('VEP_CONFIG_URI')
+    except Exception:
+        pass
+    else:
+        env_to_set["VEP_CONFIG_URI"] = vep_config_uri
+
     print('setting environment')
 
     for e, value in env_to_set.items():
         safe_call('/bin/sh', '-c',
-                  'set -ex; echo "export {}={}" | tee -a /etc/environment /usr/lib/spark/conf/spark-env.sh'.format(e, value))
+                  'set -ex; echo "export {}={}" | tee -a /etc/environment /usr/lib/spark/conf/spark-env.sh'.format(e,
+                                                                                                                   value))
 
     hail_jar = sp.check_output([
         '/bin/sh', '-c',
@@ -114,28 +121,43 @@ if role == 'Master':
             out.write(c)
             out.write('\n')
 
-    # create Jupyter kernel spec file
-    kernel = {
-        'argv': [
-            '/opt/conda/default/bin/python',
-            '-m',
-            'ipykernel',
-            '-f',
-            '{connection_file}'
-        ],
-        'display_name': 'Hail',
-        'language': 'python',
-        'env': {
-            **env_to_set,
-            'HAIL_SPARK_MONITOR': '1',
-            'SPARK_MONITOR_UI': 'http://localhost:8088/proxy/%APP_ID%',
+    # Update python3 kernel spec with the environment variables and the hail
+    # spark monitor
+    try:
+        with open('/opt/conda/default/share/jupyter/kernels/python3/kernel.json', 'r') as f:
+            python3_kernel = json.load(f)
+    except:  # noqa: E722
+        python3_kernel = {
+            'argv': [
+                '/opt/conda/default/bin/python',
+                '-m',
+                'ipykernel',
+                '-f',
+                '{connection_file}'
+            ],
+            'display_name': 'Python 3',
+            'language': 'python',
         }
+    python3_kernel['env'] = {
+        **python3_kernel.get('env', dict()),
+        **env_to_set,
+        'HAIL_SPARK_MONITOR': '1',
+        'SPARK_MONITOR_UI': 'http://localhost:8088/proxy/%APP_ID%',
     }
 
-    # write kernel spec file to default Jupyter kernel directory
+    # write python3 kernel spec file to default Jupyter kernel directory
+    mkdir_if_not_exists('/opt/conda/default/share/jupyter/kernels/python3/')
+    with open('/opt/conda/default/share/jupyter/kernels/python3/kernel.json', 'w') as f:
+        json.dump(python3_kernel, f)
+
+    # some old notebooks use the "Hail" kernel, so create that too
+    hail_kernel = {
+        **python3_kernel,
+        'display_name': 'Hail'
+    }
     mkdir_if_not_exists('/opt/conda/default/share/jupyter/kernels/hail/')
     with open('/opt/conda/default/share/jupyter/kernels/hail/kernel.json', 'w') as f:
-        json.dump(kernel, f)
+        json.dump(hail_kernel, f)
 
     # create Jupyter configuration file
     mkdir_if_not_exists('/opt/conda/default/etc/jupyter/')
@@ -151,7 +173,7 @@ if role == 'Master':
         f.write('\n'.join(opts) + '\n')
 
     print('copying spark monitor')
-    spark_monitor_gs = 'gs://hail-common/sparkmonitor-3b2bc8c22921f5c920fc7370f3a160d820db1f51/sparkmonitor-0.0.11-py3-none-any.whl'
+    spark_monitor_gs = 'gs://hail-common/sparkmonitor-3357488112c6c162c12f8386faaadcbf3789ac02/sparkmonitor-0.0.12-py3-none-any.whl'
     spark_monitor_wheel = '/home/hail/' + spark_monitor_gs.split('/')[-1]
     safe_call('gsutil', 'cp', spark_monitor_gs, spark_monitor_wheel)
     safe_call('pip', 'install', spark_monitor_wheel)
@@ -161,7 +183,9 @@ if role == 'Master':
     safe_call('/opt/conda/default/bin/jupyter', 'nbextension', 'install', '--user', '--py', 'sparkmonitor')
     safe_call('/opt/conda/default/bin/jupyter', 'nbextension', 'enable', '--user', '--py', 'sparkmonitor')
     safe_call('/opt/conda/default/bin/jupyter', 'nbextension', 'enable', '--user', '--py', 'widgetsnbextension')
-    safe_call("""ipython profile create && echo "c.InteractiveShellApp.extensions.append('sparkmonitor.kernelextension')" >> $(ipython profile locate default)/ipython_kernel_config.py""", shell=True)
+    safe_call(
+        """ipython profile create && echo "c.InteractiveShellApp.extensions.append('sparkmonitor.kernelextension')" >> $(ipython profile locate default)/ipython_kernel_config.py""",
+        shell=True)
 
     # create systemd service file for Jupyter notebook server process
     with open('/lib/systemd/system/jupyter.service', 'w') as f:

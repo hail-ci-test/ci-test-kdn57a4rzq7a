@@ -4,6 +4,7 @@ import sass
 import jinja2
 import aiohttp_jinja2
 import aiohttp_session
+import aiohttp
 from hailtop.config import get_deploy_config
 from gear import new_csrf_token
 
@@ -18,6 +19,7 @@ def sass_compile(module_name):
 
     scss_path = f'{module_root}/styles'
     css_path = f'{module_root}/static/css'
+    os.makedirs(scss_path, exist_ok=True)
     os.makedirs(css_path, exist_ok=True)
 
     sass.compile(
@@ -25,11 +27,12 @@ def sass_compile(module_name):
         include_paths=[f'{WEB_COMMON_ROOT}/styles'])
 
 
-def setup_aiohttp_jinja2(app, module):
+def setup_aiohttp_jinja2(app: aiohttp.web.Application, module: str, *extra_loaders: jinja2.BaseLoader):
     aiohttp_jinja2.setup(
         app, loader=jinja2.ChoiceLoader([
             jinja2.PackageLoader('web_common'),
-            jinja2.PackageLoader(module)
+            jinja2.PackageLoader(module),
+            *extra_loaders
         ]))
 
 
@@ -57,13 +60,17 @@ def base_context(session, userdata, service):
     context = {
         'base_path': deploy_config.base_path(service),
         'base_url': deploy_config.external_url(service, ''),
+        'www_base_url': deploy_config.external_url('www', ''),
         'notebook_base_url': deploy_config.external_url('notebook', ''),
         'workshop_base_url': deploy_config.external_url('workshop', ''),
         'auth_base_url': deploy_config.external_url('auth', ''),
         'batch_base_url': deploy_config.external_url('batch', ''),
         'batch_driver_base_url': deploy_config.external_url('batch-driver', ''),
         'ci_base_url': deploy_config.external_url('ci', ''),
-        'scorecard_base_url': deploy_config.external_url('scorecard', ''),
+        'grafana_base_url': deploy_config.external_url('grafana', ''),
+        'monitoring_base_url': deploy_config.external_url('monitoring', ''),
+        'benchmark_base_url': deploy_config.external_url('benchmark', ''),
+        'blog_base_url': deploy_config.external_url('blog', ''),
         'userdata': userdata
     }
     if 'message' in session:

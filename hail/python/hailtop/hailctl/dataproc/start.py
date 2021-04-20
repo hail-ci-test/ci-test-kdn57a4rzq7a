@@ -1,10 +1,9 @@
 import re
-import subprocess as sp
-import sys
 
 import pkg_resources
 import yaml
 
+from . import gcloud
 from .cluster_config import ClusterConfig
 
 DEFAULT_PROPERTIES = {
@@ -17,7 +16,8 @@ DEFAULT_PROPERTIES = {
     'dataproc:dataproc.monitoring.stackdriver.enable': 'false'
 }
 
-# master machine type to memory map, used for setting spark.driver.memory property
+# leadre (master) machine type to memory map, used for setting
+# spark.driver.memory property
 MACHINE_MEM = {
     'n1-standard-1': 3.75,
     'n1-standard-2': 7.5,
@@ -110,7 +110,7 @@ MACHINE_MEM = {
     'm1-ultramem-160': 3844,
     'm1-megamem-96': 1433,
     'm2-ultramem-2084': 5888,
-    'm2-ultramem-4164': 11,
+    'm2-ultramem-4164': 11776,
     'c2-standard-4': 16,
     'c2-standard-8': 32,
     'c2-standard-16': 64,
@@ -134,7 +134,9 @@ REGION_TO_REPLICATE_MAPPING = {
     'australia-southeast1': 'aus-sydney'
 }
 
-IMAGE_VERSION = '1.4-debian9'
+ANNOTATION_DB_BUCKETS = ["hail-datasets-us", "hail-datasets-eu", "gnomad-public-requester-pays"]
+
+IMAGE_VERSION = '2.0.6-debian10'
 
 
 def init_parser(parser):
@@ -151,14 +153,14 @@ def init_parser(parser):
                         help='Disk size of master machine, in GB (default: %(default)s).')
     parser.add_argument('--num-master-local-ssds', default=0, type=int,
                         help='Number of local SSDs to attach to the master machine (default: %(default)s).')
-    parser.add_argument('--num-preemptible-workers', '--n-pre-workers', '-p', default=0, type=int,
-                        help='Number of preemptible worker machines (default: %(default)s).')
+    parser.add_argument('--num-secondary-workers', '--num-preemptible-workers', '--n-pre-workers', '-p', default=0, type=int,
+                        help='Number of secondary (preemptible) worker machines (default: %(default)s).')
     parser.add_argument('--num-worker-local-ssds', default=0, type=int,
                         help='Number of local SSDs to attach to each worker machine (default: %(default)s).')
     parser.add_argument('--num-workers', '--n-workers', '-w', default=2, type=int,
                         help='Number of worker machines (default: %(default)s).')
-    parser.add_argument('--preemptible-worker-boot-disk-size', default=40, type=int,
-                        help='Disk size of preemptible machines, in GB (default: %(default)s).')
+    parser.add_argument('--secondary-worker-boot-disk-size', '--preemptible-worker-boot-disk-size', default=40, type=int,
+                        help='Disk size of secondary (preemptible) worker machines, in GB (default: %(default)s).')
     parser.add_argument('--worker-boot-disk-size', default=40, type=int,
                         help='Disk size of worker machines, in GB (default: %(default)s).')
     parser.add_argument('--worker-machine-type', '--worker',
@@ -177,7 +179,9 @@ def init_parser(parser):
     parser.add_argument('--configuration',
                         help='Google Cloud configuration to start cluster (defaults to currently set configuration).')
     parser.add_argument('--max-idle', type=str, help='If specified, maximum idle time before shutdown (e.g. 60m).')
-    parser.add_argument('--max-age', type=str, help='If specified, maximum age before shutdown (e.g. 60m).')
+    max_age_group = parser.add_mutually_exclusive_group()
+    max_age_group.add_argument('--expiration-time', type=str, help='If specified, time at which cluster is shutdown (e.g. 2020-01-01T00:00:00Z).')
+    max_age_group.add_argument('--max-age', type=str, help='If specified, maximum age before shutdown (e.g. 60m).')
     parser.add_argument('--bucket', type=str,
                         help='The Google Cloud Storage bucket to use for cluster staging (just the bucket name, no gs:// prefix).')
     parser.add_argument('--network', type=str, help='the network for all nodes in this cluster')
@@ -202,6 +206,12 @@ def init_parser(parser):
                         required=False)
     parser.add_argument('--requester-pays-allow-buckets',
                         help="Comma-separated list of requester-pays buckets to allow reading from.")
+    parser.add_argument('--requester-pays-allow-annotation-db',
+                        action='store_true',
+                        help="Allows reading from any of the requester-pays buckets that hold data for the annotation database.")
+    parser.add_argument('--debug-mode',
+                        action='store_true',
+                        help="Enable debug features on created cluster (heap dump on out-of-memory error)")
 
 
 def main(args, pass_through_args):
@@ -209,13 +219,19 @@ def main(args, pass_through_args):
     conf.extend_flag('image-version', IMAGE_VERSION)
 
     if not pkg_resources.resource_exists('hailtop.hailctl', "deploy.yaml"):
-        raise RuntimeError(f"package has no 'deploy.yaml' file")
+        raise RuntimeError("package has no 'deploy.yaml' file")
     deploy_metadata = yaml.safe_load(
         pkg_resources.resource_stream('hailtop.hailctl', "deploy.yaml"))['dataproc']
 
     conf.extend_flag('properties', DEFAULT_PROPERTIES)
     if args.properties:
         conf.parse_and_extend('properties', args.properties)
+
+    if args.debug_mode:
+        conf.extend_flag('properties', {
+            "spark:spark.driver.extraJavaOptions": "-Xss4M -XX:+HeapDumpOnOutOfMemoryError",
+            "spark:spark.executor.extraJavaOptions": "-Xss4M -XX:+HeapDumpOnOutOfMemoryError",
+        })
 
     # default to highmem machines if using VEP
     if not args.worker_machine_type:
@@ -226,7 +242,7 @@ def main(args, pass_through_args):
                      [deploy_metadata['init_notebook.py']])
 
     # requester pays support
-    if args.requester_pays_allow_all or args.requester_pays_allow_buckets:
+    if args.requester_pays_allow_all or args.requester_pays_allow_buckets or args.requester_pays_allow_annotation_db:
         if args.requester_pays_allow_all and args.requester_pays_allow_buckets:
             raise RuntimeError("Cannot specify both 'requester_pays_allow_all' and 'requester_pays_allow_buckets")
 
@@ -234,10 +250,16 @@ def main(args, pass_through_args):
             requester_pays_mode = "AUTO"
         else:
             requester_pays_mode = "CUSTOM"
-            conf.extend_flag("properties", {"spark:spark.hadoop.fs.gs.requester.pays.buckets": args.requester_pays_allow_buckets})
+            requester_pays_bucket_sources = []
+            if args.requester_pays_allow_buckets:
+                requester_pays_bucket_sources.append(args.requester_pays_allow_buckets)
+            if args.requester_pays_allow_annotation_db:
+                requester_pays_bucket_sources.extend(ANNOTATION_DB_BUCKETS)
+
+            conf.extend_flag("properties", {"spark:spark.hadoop.fs.gs.requester.pays.buckets": ",".join(requester_pays_bucket_sources)})
 
         # Need to pick requester pays project.
-        requester_pays_project = args.project if args.project else sp.check_output(['gcloud', 'config', 'get-value', 'project']).decode().strip()
+        requester_pays_project = args.project if args.project else gcloud.get_config("project")
 
         conf.extend_flag("properties", {"spark:spark.hadoop.fs.gs.requester.pays.mode": requester_pays_mode,
                                         "spark:spark.hadoop.fs.gs.requester.pays.project.id": requester_pays_project})
@@ -246,10 +268,10 @@ def main(args, pass_through_args):
     if args.region:
         project_region = args.region
     else:
-        try:
-            project_region = sp.check_output(['gcloud', 'config', 'get-value', 'dataproc/region']).decode().strip()
-        except sp.CalledProcessError:
-            raise RuntimeError("Could not determine dataproc region. Use --region argument to hailctl, or use `gcloud config set dataproc/region <my-region>` to set a default.")
+        project_region = gcloud.get_config("dataproc/region")
+
+    if not project_region:
+        raise RuntimeError("Could not determine dataproc region. Use --region argument to hailctl, or use `gcloud config set dataproc/region <my-region>` to set a default.")
 
     # add VEP init script
     if args.vep:
@@ -262,6 +284,8 @@ def main(args, pass_through_args):
                                f"  Supported regions: {', '.join(REGION_TO_REPLICATE_MAPPING.keys())}")
         print(f"Pulling VEP data from bucket in {replicate}.")
         conf.extend_flag('metadata', {"VEP_REPLICATE": replicate})
+        vep_config_path = "/vep_data/vep-gcloud.json"
+        conf.extend_flag('metadata', {"VEP_CONFIG_PATH": vep_config_path, "VEP_CONFIG_URI": f"file://{vep_config_path}"})
         conf.extend_flag('initialization-actions', [deploy_metadata[f'vep-{args.vep}.sh']])
     # add custom init scripts
     if args.init:
@@ -281,7 +305,7 @@ def main(args, pass_through_args):
         packages.extend(re.split(split_regex, metadata_pkgs))
     if args.packages:
         packages.extend(re.split(split_regex, args.packages))
-    conf.extend_flag('metadata', {'PKGS': '|'.join(packages)})
+    conf.extend_flag('metadata', {'PKGS': '|'.join(set(packages))})
 
     def disk_size(size):
         if args.vep:
@@ -294,10 +318,10 @@ def main(args, pass_through_args):
     conf.flags['master-machine-type'] = args.master_machine_type
     conf.flags['master-boot-disk-size'] = '{}GB'.format(args.master_boot_disk_size)
     conf.flags['num-master-local-ssds'] = args.num_master_local_ssds
-    conf.flags['num-preemptible-workers'] = args.num_preemptible_workers
+    conf.flags['num-secondary-workers'] = args.num_secondary_workers
     conf.flags['num-worker-local-ssds'] = args.num_worker_local_ssds
     conf.flags['num-workers'] = args.num_workers
-    conf.flags['preemptible-worker-boot-disk-size'] = disk_size(args.preemptible_worker_boot_disk_size)
+    conf.flags['secondary-worker-boot-disk-size'] = disk_size(args.secondary_worker_boot_disk_size)
     conf.flags['worker-boot-disk-size'] = disk_size(args.worker_boot_disk_size)
     conf.flags['worker-machine-type'] = args.worker_machine_type
     if args.region:
@@ -314,11 +338,9 @@ def main(args, pass_through_args):
     if args.bucket:
         conf.flags['bucket'] = args.bucket
 
-    try:
-        label = sp.check_output(['gcloud', 'config', 'get-value', 'account'])
-        conf.flags['labels'] = 'creator=' + re.sub(r'[^0-9a-z_\-]', '_', label.decode().strip().lower())[:63]
-    except sp.CalledProcessError as e:
-        sys.stderr.write("Warning: could not run 'gcloud config get-value account': " + e.output.decode() + "\n")
+    account = gcloud.get_config("account")
+    if account:
+        conf.flags['labels'] = 'creator=' + re.sub(r'[^0-9a-z_\-]', '_', account.lower())[:63]
 
     # rewrite metadata and properties to escape them
     conf.flags['metadata'] = '^|||^' + '|||'.join(f'{k}={v}' for k, v in conf.flags['metadata'].items())
@@ -333,6 +355,8 @@ def main(args, pass_through_args):
         cmd.append('--max-idle={}'.format(args.max_idle))
     if args.max_age:
         cmd.append('--max-age={}'.format(args.max_age))
+    if args.expiration_time:
+        cmd.append('--expiration_time={}'.format(args.expiration_time))
 
     cmd.extend(pass_through_args)
 
@@ -342,9 +366,16 @@ def main(args, pass_through_args):
     # spin up cluster
     if not args.dry_run:
         print("Starting cluster '{}'...".format(args.name))
-        sp.check_call(cmd)
+        gcloud.run(cmd[1:])
 
-        if args.master_tags:
-            sp.check_call([
-                'gcloud', 'compute', 'instances', 'add-tags', args.name + '-m', '--tags',
-                args.master_tags])
+    if args.master_tags:
+        add_tags_command = ['compute', 'instances', 'add-tags', args.name + '-m', '--tags', args.master_tags]
+
+        if args.project:
+            add_tags_command.append(f"--project={args.project}")
+        if args.zone:
+            add_tags_command.append(f"--zone={args.zone}")
+
+        print('gcloud ' + ' '.join(add_tags_command))
+        if not args.dry_run:
+            gcloud.run(add_tags_command)

@@ -15,7 +15,7 @@ steps:
       mkdir repo
       cd repo
       {{ code.checkout_script }}
-      make -C hail python-version-info
+      make -C hail python/hailtop/hail_version
       git rev-parse HEAD > git_version
     outputs:
       - from: /io/repo/
