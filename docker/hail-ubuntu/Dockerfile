@@ -1,5 +1,6 @@
 FROM gcr.io/{{ global.project }}/ubuntu:focal-20201106
 ENV LANG C.UTF-8
+ENV DEBIAN_FRONTEND noninteractive
 COPY retry /bin/retry
 COPY hail-apt-get-install /bin/hail-apt-get-install
 COPY pip.conf /root/.config/pip/pip.conf

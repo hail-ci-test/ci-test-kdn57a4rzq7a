@@ -1,6 +1,7 @@
 FROM {{ hail_public_image.image }}
 
 RUN hail-apt-get-install \
+    bzip2 \
     cmake \
     libbz2-dev \
     libcurl4-openssl-dev \
